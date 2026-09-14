@@ -1,0 +1,42 @@
+# Host-frontend overlay for the Docker dev stack.
+#
+# Purpose: run the Next.js frontend on the Windows host (Node v20+) instead of
+# compiling it inside a container. The frontend `next build` / `next dev` was the
+# memory hog that froze the 16GB host, so we skip the `frontend` service entirely.
+#
+# Run with:
+#   docker compose -p deer-flow-dev \
+#     -f docker/docker-compose-dev.yaml \
+#     -f docker/docker-compose.host-frontend.yaml \
+#     -f docker/docker-compose.dood.yaml \
+#     up -d --build redis gateway nginx
+#
+# Then on the host, from the repo root:
+#   cd frontend && corepack pnpm install && corepack pnpm dev
+#
+# nginx routes `/` to host.docker.internal:3000 (see docker/nginx/nginx.conf).
+services:
+  nginx:
+    # Drop the `frontend` dependency so the frontend container is NOT started.
+    # Compose merges `depends_on` as a union, so listing `gateway` alone is not
+    # enough to remove the base file's `frontend` dependency — hence `!override`,
+    # which replaces the whole depends_on mapping.
+    depends_on: !override
+      gateway:
+        condition: service_started
+        required: true
+
+  gateway:
+    # Publish the Gateway on loopback so the host Next.js SSR process can call it
+    # at http://localhost:8001 (set DEER_FLOW_INTERNAL_GATEWAY_BASE_URL to match).
+    ports:
+      - "127.0.0.1:8001:8001"
+    # Docker Desktop (WSL2) DooD sandbox fix: the AIO provider resolves
+    # host.docker.internal to the daemon's host-gateway IP (192.168.65.254) and
+    # tries to publish the per-thread sandbox port there, which Docker Desktop
+    # cannot bind -> "ports are not available". Binding 0.0.0.0 is reachable from
+    # the gateway via host.docker.internal (tested). It re-exposes the
+    # unauthenticated sandbox exec API on every host interface; pair with a
+    # firewall or run only on a trusted host.
+    environment:
+      - DEER_FLOW_SANDBOX_BIND_HOST=0.0.0.0
