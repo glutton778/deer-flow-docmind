@@ -8,6 +8,14 @@
 --   * doc_category 为开放取值（书籍/白皮书/会议记录/任务表/介绍/其他…），
 --     此处用 TEXT 不加 CHECK，保留扩展空间；agent_type 则严格三选一。
 --   * 目标库：/mnt/user-data/outputs/doc_analysis.db（沙箱内 host 持久目录）。
+--
+-- V2（Evidence Agent + 原文证据溯源）增量：
+--   * 新增第 4、5 张表 document_claim / evidence_verification；
+--   * 前 3 张表的字段与语义**完全未改动**（含 agent_type 的三选一 CHECK、
+--     hallucination_check_flag 的 pass/fail/unknown CHECK）；
+--   * document_claim 用 **(doc_id, claim_id) 复合主键**：claim_id 只保证单份文档内唯一
+--     （C001、C002…，方便 LLM 顺序编号），复合主键避免跨文档撞号；
+--   * evidence_verification.page **恒为 NULL**：当前文档转换不保留页码，填页码即编造。
 -- ============================================================================
 
 PRAGMA foreign_keys = ON;
@@ -53,3 +61,45 @@ CREATE TABLE IF NOT EXISTS doc_analysis_result (
     FOREIGN KEY (doc_id) REFERENCES doc_source(doc_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_doc_analysis_result_doc_id ON doc_analysis_result(doc_id);
+
+-- ---------------------------------------------------------------------------
+-- 4. Claim 表（V2 新增）——从三份子输出 + 合并结果里抽出的「待核验关键结论」
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS document_claim (
+    doc_id       TEXT NOT NULL,                   -- 关联 doc_source.doc_id
+    claim_id     TEXT NOT NULL,                   -- C001 / C002 …（单份文档内唯一）
+    source_agent TEXT NOT NULL
+        CHECK (source_agent IN ('overview', 'insight', 'action', 'coordinator')),
+    claim_text   TEXT NOT NULL,                   -- 结论原文
+    claim_type   TEXT NOT NULL
+        CHECK (claim_type IN ('fact', 'risk', 'action', 'summary', 'inference')),
+    created_at   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    PRIMARY KEY (doc_id, claim_id),               -- 复合主键：允许不同文档都从 C001 开始
+    FOREIGN KEY (doc_id) REFERENCES doc_source(doc_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_document_claim_doc_id ON document_claim(doc_id);
+
+-- ---------------------------------------------------------------------------
+-- 5. 证据核验表（V2 新增）——每条 Claim 一条核验结果
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS evidence_verification (
+    evidence_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_id              TEXT NOT NULL,            -- 关联 doc_source.doc_id
+    claim_id            TEXT NOT NULL,            -- 关联 document_claim.(doc_id, claim_id)
+    verification_status TEXT NOT NULL
+        CHECK (verification_status IN ('verified', 'contradicted', 'unsupported', 'inferred')),
+    evidence_text       TEXT,                     -- 逐字摘抄的证据原文（verified/contradicted 必填）
+    page                INTEGER,                  -- 恒为 NULL：当前转换不保留页码，禁止伪造
+    section             TEXT,                     -- 章节 / 条款号（如"第二条"），拿不到即 NULL
+    source_offset       TEXT,                     -- 行号区间（如 "12-14"），拿不到即 NULL
+    source_locator      TEXT,                     -- 原文逐字片段（最可靠的定位手段），拿不到即 NULL
+    confidence          REAL
+        CHECK (confidence IS NULL OR (confidence >= 0.0 AND confidence <= 1.0)),
+    verify_time         TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    FOREIGN KEY (doc_id, claim_id)
+        REFERENCES document_claim(doc_id, claim_id) ON DELETE CASCADE,
+    FOREIGN KEY (doc_id) REFERENCES doc_source(doc_id) ON DELETE CASCADE,
+    UNIQUE (doc_id, claim_id)                     -- 一条 Claim 恰好一条核验结果
+);
+CREATE INDEX IF NOT EXISTS idx_evidence_verification_doc_id ON evidence_verification(doc_id);
+CREATE INDEX IF NOT EXISTS idx_evidence_verification_status ON evidence_verification(verification_status);

@@ -82,6 +82,63 @@ sandbox:
 
 ## 6. 其余建议
 - **DB 备份**：库随线程持久目录；如需集中备份用副方案挂载到统一目录后 `cp`。
-- **大小控制**：`SUBAGENT_LIMIT=60000` / `REPORT_LIMIT=100000` / `SHORT_LIMIT=500`，防止单字段过大；超长自动截断并加标记。
+- **大小控制**：`SUBAGENT_LIMIT=60000` / `REPORT_LIMIT=100000` / `SHORT_LIMIT=500` / `EVIDENCE_LIMIT=2000`，防止单字段过大；超长自动截断并加标记。
 - **进程内写库权限**：沙箱 `--cap-drop=ALL`，但写 host 挂载目录主要受**目录权限**约束（非能力约束），归到第 2 节挂载说明里处理。
 - **不引进新服务**：全程仅用 SQLite 文件 + 沙箱内 python3；没有额外容器、消息队列或后端服务。
+
+---
+
+## 7. V2 增量（Evidence Agent + 原文证据溯源）
+
+> 本节的改动**不涉及 Docker**：不加容器、不改镜像、不改端口、不改挂载。仍是「宿主机 Next.js + 容器 gateway/sandbox」的混合部署。
+
+### 7.1 需要动的只有两处配置（都不入库）
+| 位置 | 动作 |
+|------|------|
+| 根 `config.yaml` → `subagents.custom_agents` | 追加 `agent-evidence`（YAML 见 `subagents/README.md`） |
+| `.deer-flow/users/{uid}/skills/custom/db_persist_skill/SKILL.md` | 用 `db_persist_skill/SKILL.md` 覆盖（新增第 4、5 张表与抗伪造校验） |
+
+同样，`.deer-flow/users/{uid}/agents/intelligent-technical-document-analyzer/SOUL.md` 需用 `system_prompt/SOUL_main_coordinator.md` 覆盖。
+改完**重启 Gateway** 生效（`docker restart deer-flow-gateway`）。
+
+### 7.2 数据库：仍是同一个 SQLite 文件（5 张表）
+- 库位置不变：`/mnt/user-data/outputs/doc_analysis.db`。
+- **新增表由 `insert.py` 用 `CREATE TABLE IF NOT EXISTS` 自动补建**——已存在的旧库**无需删库、无需迁移**，下次入库时自动建出新表。
+- 三个旧表（`doc_source` / `agent_intermediate` / `doc_analysis_result`）的字段与语义**完全未改**，`hallucination_check_flag` 的 `pass|fail|unknown` 语义也**未改**。
+
+### 7.3 页码：为什么 `page` 恒为 NULL
+`utils/file_conversion.py::convert_file_to_markdown()` 把 PDF/Office 转成**一份扁平 Markdown**（`pymupdf4llm` 优先，稀疏则退 `MarkItDown`），**不保留页码**；系统里唯一的定位体系是
+`utils/file_outline.py::extract_outline()` 返回的 `{title, line}`（**1-based 行号**，上限 50 条）。
+所以任何"页码"都只可能是模型编造的 → 契约层与 `insert.py` 都会**强制把 `page` 置为 NULL**。
+真实可用的定位是：`section`（章节/条款号）+ `source_offset`（行号区间）+ `source_locator`（原文逐字片段）。
+
+> **前置条件**：`uploads.auto_convert_documents` **默认为 off**（见 `backend/docs/FILE_UPLOAD.md`），
+> 要让上传的 PDF/Word 自动转成可读 Markdown（`/mnt/user-data/uploads/<name>.md`），需在 `config.yaml` 的 `uploads:` 下开启。
+
+### 7.4 如何跑测试（零第三方依赖，离线）
+```bash
+# 契约层 + 四个状态用例（28 个用例）
+python -m unittest discover -s plans/techdoc-agent-general/evidence -t plans/techdoc-agent-general/evidence -v
+
+# backend 侧薄壳（证明契约可从框架测试运行器触达）
+cd backend && PYTHONPATH=. uv run pytest tests/test_techdoc_evidence_contract.py -q
+```
+两个套件都**不需要** Gateway、模型密钥或 Docker，纯 stdlib。
+
+### 7.5 手工验证 Evidence Agent（在线，需 Gateway 运行）
+1. 起服务：`docker compose ... up` + 宿主机 `pnpm dev`，浏览器开 `127.0.0.1:2026`。
+2. 上传/粘贴一份**含明确论断**的短文档（建议直接用 7.6 的例子，便于对照）。
+3. 期望在最终报告里看到每条核心结论下多出「**证据核验**」小节：`verified` 带证据原文+来源+置信度，`unsupported`/`inferred` 带 ⚠️ 提示。
+4. 查库确认 5 张表都有数据（在沙箱里跑，或把 `doc_analysis.db` 拷出来用本机 sqlite 工具看）：
+```sql
+SELECT claim_id, claim_type, claim_text FROM document_claim ORDER BY claim_id;
+SELECT claim_id, verification_status, page, section, source_locator, confidence
+  FROM evidence_verification ORDER BY claim_id;
+```
+5. **重点看**：`page` 列必须**全为 NULL**（若出现数字，说明有环节绕过了强制规则，属 bug）。
+
+### 7.6 已知限制（诚实声明）
+- Evidence Agent 是 **LLM 判定**，离线无法验证其语义准确度；离线测试固定的是**契约语义**（给定该输出 → 必判该状态、必那样渲染），不是「LLM 面对真实文档一定能判对」。
+- 无页码 → 定位精度止于「章节 + 行号 + 逐字片段」；行号来自 outline（上限 50 条），长文档中后段可能定位不到。
+- 证据核验的输入 `raw_doc_text` 会被截断 → 落在截断部分的内容可能被误判为 `unsupported`（提示词已要求"不确定就判 unsupported 不要猜"，但仍会有偏差）。
+- `evidence_contract.py` 与 `insert.py` 的抗伪造校验是**两处副本**（技能树只读挂载，沙箱脚本无法 import 该模块），必须手工同步；权威规格与测试在 `evidence_contract.py`。
