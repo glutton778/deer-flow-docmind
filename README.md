@@ -1,6 +1,6 @@
 # DocMind — 多智能体通用文档智能解析 Agent
 
-> **TechDocAnalyzer** · 基于 **DeerFlow**（LangGraph 多智能体框架）二次开发
+> **DocMind** · 基于 **DeerFlow**（LangGraph 多智能体框架）二次开发
 > 一键把「任意非结构化文档」解析成 **结构化 · 可行动 · 风险可见 · 证据可溯源** 的分析报告，并持久化到 SQLite。
 
 ---
