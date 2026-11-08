@@ -154,7 +154,7 @@ pnpm dev                        # 宿主机 Next.js 前端
 
 1. **三个抽取 Agent 并行分工** —— `agent-overview`（概览）/ `agent-insight`（洞察）/ `agent-action`（行动项），三者无依赖、并行执行；
 2. **主 Coordinator 合并去重并抽取关键结论 Claim** —— 编号 `C001…`，每条标注来源 Agent 与类型（`fact / risk / action / summary / inference`）；
-3. **Evidence Agent（`agent-evidence`）逐条做原文证据核验** —— 对每条 Claim 判定 `verified` / `contradicted` / `unsupported` / `inferred` 四态之一，并给出逐字证据、定位与置信度。
+3. **Evidence Agent（`agent-evidence`）逐条做原文证据核验** —— 对每条 Claim 判定 `verified` / `contradicted` / `unsupported` / `inferred` 四态之一，并给出逐字证据、定位和置信度。
 
 最后由主 Coordinator 生成含「证据核验」小节的终稿，并调用 `db_persist_skill` 写入 SQLite。
 
